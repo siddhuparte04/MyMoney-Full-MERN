@@ -12,6 +12,8 @@ import {
 import { apiRequest, jsonBody } from './api';
 
 const COLORS = ['#159b68', '#2884f4', '#f16b6b', '#ffb22c', '#8548d8', '#a2b0bf', '#bb5ca8'];
+const DEFAULT_FIXED_SAVING_AMOUNT = 2000;
+const FIXED_SAVING_CATEGORY = 'Fixed Monthly Saving';
 const money = (value) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(Number(value || 0));
 const today = () => new Date().toISOString().slice(0, 10);
 const monthName = (date = new Date()) => date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
@@ -82,7 +84,32 @@ function App() {
         apiRequest('/dashboard/summary'), apiRequest('/transactions'), apiRequest('/budget'),
         apiRequest('/loans'), apiRequest('/goals')
       ]);
-      setSummary(s.summary); setTransactions(t.transactions || []); setBudget(b.budget || { monthlySalary: 0, categories: [] });
+      setSummary(s.summary); setTransactions(t.transactions || []);
+      const loadedBudget = b.budget || { monthlySalary: 0, categories: [] };
+      const loadedSalary = Math.max(0, Number(loadedBudget.monthlySalary) || 0);
+      const loadedCategories = loadedBudget.categories || [];
+      const fixedCategory = loadedCategories.find(category => category.name === FIXED_SAVING_CATEGORY);
+      const fixedSavingAmount = Math.max(0, Number(fixedCategory?.amount ?? DEFAULT_FIXED_SAVING_AMOUNT) || 0);
+      if (!fixedCategory && loadedSalary > fixedSavingAmount && loadedCategories.length) {
+        const previousTotal = loadedCategories.reduce((sum, category) => sum + (Number(category.amount) || 0), 0);
+        const available = loadedSalary - fixedSavingAmount;
+        setBudget({
+          ...loadedBudget,
+          categories: [
+            ...loadedCategories.map(category => ({
+              ...category,
+              amount: previousTotal > 0
+                ? Number((((Number(category.amount) || 0) / previousTotal) * available).toFixed(2))
+                : 0
+            })),
+            { name: FIXED_SAVING_CATEGORY, amount: fixedSavingAmount, color: '#8548d8' }
+          ]
+        });
+      } else if (!fixedCategory) {
+        setBudget({ ...loadedBudget, categories: [...loadedCategories, { name: FIXED_SAVING_CATEGORY, amount: fixedSavingAmount, color: '#8548d8' }] });
+      } else {
+        setBudget(loadedBudget);
+      }
       setLoans(l.loans || []); setGoals(g.goals || []);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -112,7 +139,14 @@ function App() {
   }
   async function saveBudget(e) {
     e.preventDefault();
-    await runAction(() => apiRequest('/budget', { method: 'PUT', body: jsonBody({ monthlySalary: Number(budget.monthlySalary), categories: budget.categories.map(c => ({ name: c.name, amount: Number(c.amount), color: c.color })) }) }), 'Salary plan updated.');
+    const fixedCategory = (budget.categories || []).find(c => c.name === FIXED_SAVING_CATEGORY);
+    const fixedSavingAmount = Math.max(0, Number(fixedCategory?.amount ?? DEFAULT_FIXED_SAVING_AMOUNT) || 0);
+    const variableCategories = (budget.categories || []).filter(c => c.name !== FIXED_SAVING_CATEGORY);
+    const categoriesToSave = [
+      ...variableCategories.map(c => ({ name: c.name, amount: Number(c.amount), color: c.color })),
+      { name: FIXED_SAVING_CATEGORY, amount: fixedSavingAmount, color: '#8548d8' }
+    ];
+    await runAction(() => apiRequest('/budget', { method: 'PUT', body: jsonBody({ monthlySalary: Number(budget.monthlySalary), categories: categoriesToSave }) }), `Salary plan updated. ${money(fixedSavingAmount)} fixed monthly saving is included.`);
   }
   async function saveGoal(e) {
     e.preventDefault();
@@ -289,15 +323,174 @@ function TransactionsPage({ transactions, filterType, setFilterType, search, set
   return <><div className="toolbar"><div className="filter-tabs">{['All','Income','Expense','Lent','Repayment'].map(t=><button className={filterType===t?'selected':''} key={t} onClick={()=>setFilterType(t)}>{t}</button>)}</div><button className="primary" onClick={()=>{setTransactionForm({date:today(),description:'',category:'Food & Dining',amount:'',type:'Expense',note:''});setModal('transaction')}}><Plus size={17}/> Add transaction</button></div><Panel title={`${transactions.length} transaction(s)`} icon={ArrowLeftRight}><TransactionTable transactions={transactions} money={money} onDelete={onDelete}/></Panel></>;
 }
 function BudgetPage({ budget, setBudget, onSave, money }) {
-  const total = (budget.categories||[]).reduce((s,c)=>s+Number(c.amount||0),0);
-  function updateCategory(index, key, value) { setBudget({...budget,categories:budget.categories.map((c,i)=>i===index?{...c,[key]:value}:c)}); }
-  function addCategory() { setBudget({...budget,categories:[...budget.categories,{name:'New category',amount:0,color:COLORS[budget.categories.length%COLORS.length]}]}); }
-  function removeCategory(index) { setBudget({...budget,categories:budget.categories.filter((_,i)=>i!==index)}); }
-  return <div className="single-column"><Panel title="Your monthly salary plan" icon={Wallet}><form onSubmit={onSave}>
-    <div className="salary-input-row"><label>Monthly salary (₹)<input type="number" min="0" value={budget.monthlySalary} onChange={e=>setBudget({...budget,monthlySalary:e.target.value})} required/></label><div className="budget-summary"><small>Planned allocation</small><strong>{money(total)}</strong><span className={total>Number(budget.monthlySalary)?'over-budget':''}>{money(Number(budget.monthlySalary)-total)} {Number(budget.monthlySalary)>=total?'left':'over budget'}</span></div></div>
-    <div className="budget-category-editor">{budget.categories.map((c,i)=><div className="budget-edit-row" key={c._id||i}><span className="dot" style={{background:c.color||COLORS[i%COLORS.length]}}/><input aria-label="Category name" value={c.name} onChange={e=>updateCategory(i,'name',e.target.value)} required/><div className="money-input"><span>₹</span><input aria-label="Budget amount" type="number" min="0" value={c.amount} onChange={e=>updateCategory(i,'amount',e.target.value)} required/></div><span className="percentage">{budget.monthlySalary?Math.round(Number(c.amount)/Number(budget.monthlySalary)*100):0}%</span><button type="button" className="icon-btn danger-btn" onClick={()=>removeCategory(i)}><Trash2 size={16}/></button></div>)}</div>
-    <div className="budget-footer"><button type="button" className="secondary" onClick={addCategory}><Plus size={16}/> Add category</button><button className="primary"><Check size={16}/> Save salary plan</button></div>
-  </form></Panel><div className="callout"><Sparkles size={21}/><div><strong>Tip: Give every rupee a purpose.</strong><p>Try to allocate your salary to essentials, personal spending, family support, and savings. Your planned amounts can be changed at any time.</p></div></div></div>;
+  const salary = Math.max(0, Number(budget.monthlySalary) || 0);
+  const allCategories = budget.categories || [];
+  const categories = allCategories.filter(category => category.name !== FIXED_SAVING_CATEGORY);
+  const fixedCategory = allCategories.find(category => category.name === FIXED_SAVING_CATEGORY);
+  const fixedSaving = Math.max(0, Number(fixedCategory?.amount ?? DEFAULT_FIXED_SAVING_AMOUNT) || 0);
+  const availableForDivision = Math.max(0, salary - fixedSaving);
+  const variableTotal = categories.reduce((sum, category) => sum + (Number(category.amount) || 0), 0);
+  const total = variableTotal + (salary >= fixedSaving ? fixedSaving : 0);
+  const totalPercentage = availableForDivision > 0
+    ? categories.reduce((sum, category) => sum + ((Number(category.amount) || 0) / availableForDivision) * 100, 0)
+    : 0;
+  const remaining = salary - total;
+
+  function updateCategory(index, key, value) {
+    const selectedCategory = categories[index];
+    setBudget(current => ({
+      ...current,
+      categories: (current.categories || []).map(category => {
+        if (category === selectedCategory || (selectedCategory?._id && category._id === selectedCategory._id)) {
+          if (key === 'percentage') {
+            const percentage = Math.max(0, Number(value) || 0);
+            return { ...category, amount: Number(((availableForDivision * percentage) / 100).toFixed(2)) };
+          }
+          return { ...category, [key]: value };
+        }
+        return category;
+      })
+    }));
+  }
+
+  function updateSalary(value) {
+    const nextSalary = Math.max(0, Number(value) || 0);
+    const nextAvailable = Math.max(0, nextSalary - fixedSaving);
+    const oldAvailable = Math.max(0, salary - fixedSaving);
+    setBudget(current => ({
+      ...current,
+      monthlySalary: value,
+      categories: (current.categories || []).map(category => {
+        if (category.name === FIXED_SAVING_CATEGORY) return { ...category, color: category.color || '#8548d8' };
+        const oldAmount = Number(category.amount) || 0;
+        const percentage = oldAvailable > 0 ? (oldAmount / oldAvailable) * 100 : 0;
+        return { ...category, amount: Number(((nextAvailable * percentage) / 100).toFixed(2)) };
+      })
+    }));
+  }
+
+  function updateFixedSaving(value) {
+    const nextFixed = Math.max(0, Number(value) || 0);
+    const nextAvailable = Math.max(0, salary - nextFixed);
+    const oldAvailable = Math.max(0, salary - fixedSaving);
+    setBudget(current => {
+      const existing = current.categories || [];
+      const variableCategories = existing.filter(category => category.name !== FIXED_SAVING_CATEGORY).map(category => {
+        const oldAmount = Number(category.amount) || 0;
+        const percentage = oldAvailable > 0 ? oldAmount / oldAvailable : 0;
+        return { ...category, amount: Number((nextAvailable * percentage).toFixed(2)) };
+      });
+      return {
+        ...current,
+        categories: [...variableCategories, { ...(existing.find(category => category.name === FIXED_SAVING_CATEGORY) || {}), name: FIXED_SAVING_CATEGORY, amount: nextFixed, color: '#8548d8' }]
+      };
+    });
+  }
+
+  function addCategory() {
+    setBudget(current => ({
+      ...current,
+      categories: [
+        ...(current.categories || []).filter(category => category.name !== FIXED_SAVING_CATEGORY),
+        { name: 'New category', amount: 0, color: COLORS[(categories.length) % COLORS.length] },
+        ...(current.categories || []).filter(category => category.name === FIXED_SAVING_CATEGORY)
+      ]
+    }));
+  }
+
+  function removeCategory(index) {
+    const selectedCategory = categories[index];
+    setBudget(current => ({
+      ...current,
+      categories: (current.categories || []).filter(category =>
+        category !== selectedCategory && !(selectedCategory?._id && category._id === selectedCategory._id)
+      )
+    }));
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (salary < fixedSaving) {
+      window.alert(`Your monthly salary must be at least ${money(fixedSaving)} to cover your fixed saving.`);
+      return;
+    }
+    if (!categories.length) {
+      window.alert('Please add at least one category for the remaining salary.');
+      return;
+    }
+    if (categories.some(category => !String(category.name || '').trim())) {
+      window.alert('Please enter a name for every category.');
+      return;
+    }
+    if (Math.abs(totalPercentage - 100) > 0.05) {
+      window.alert(`The percentages for the remaining salary must total 100%. Current total: ${totalPercentage.toFixed(2)}%.`);
+      return;
+    }
+    onSave(event);
+  }
+
+  return <div className="single-column">
+    <Panel title="Divide your monthly salary" icon={Wallet}>
+      <form onSubmit={handleSubmit}>
+        <div className="salary-input-row">
+          <label>
+            Monthly salary received (₹)
+            <input type="number" min="1" step="0.01" value={budget.monthlySalary ?? ''} onChange={event => updateSalary(event.target.value)} required />
+          </label>
+          <div className="budget-summary">
+            <small>Total allocated</small>
+            <strong>{money(total)}</strong>
+            <span className={remaining < -0.01 ? 'over-budget' : ''}>
+              {money(Math.abs(remaining))} {remaining >= -0.01 ? 'left' : 'over budget'}
+            </span>
+          </div>
+        </div>
+
+        <div className="callout" style={{ marginBottom: 18 }}>
+          <PiggyBank size={22} />
+          <div>
+            <strong>Fixed monthly saving</strong>
+            <p>Choose how much you want to reserve every month. The remaining {money(availableForDivision)} will be divided across the categories below.</p>
+            <label style={{ display: 'block', maxWidth: 240, marginTop: 10 }}>Monthly fixed saving (₹)
+              <input type="number" min="0" step="0.01" max={salary} value={fixedSaving} onChange={event => updateFixedSaving(event.target.value)} required />
+            </label>
+          </div>
+        </div>
+
+        <div className="budget-category-editor">
+          {categories.map((category, index) => {
+            const percentage = availableForDivision > 0 ? ((Number(category.amount) || 0) / availableForDivision) * 100 : 0;
+            return <div className="budget-edit-row" key={category._id || `${category.name}-${index}`}>
+              <span className="dot" style={{ background: category.color || COLORS[index % COLORS.length] }} />
+              <input aria-label="Category name" value={category.name || ''} onChange={event => updateCategory(index, 'name', event.target.value)} placeholder="e.g. Family, Grooming, Friend" required />
+              <label className="percentage-input">
+                <span>Percent of remaining</span>
+                <div className="money-input">
+                  <input aria-label={`Percentage for ${category.name || `category ${index + 1}`}`} type="number" min="0" max="100" step="0.01" value={Number(percentage.toFixed(2))} onChange={event => updateCategory(index, 'percentage', event.target.value)} required />
+                  <span>%</span>
+                </div>
+              </label>
+              <div className="calculated-amount"><small>Amount</small><strong>{money(category.amount)}</strong></div>
+              <button type="button" className="icon-btn danger-btn" aria-label={`Remove ${category.name || 'category'}`} onClick={() => removeCategory(index)}><Trash2 size={16} /></button>
+            </div>;
+          })}
+        </div>
+
+        <div className="budget-footer">
+          <button type="button" className="secondary" onClick={addCategory}><Plus size={16} /> Add category</button>
+          <button className="primary" type="submit"><Check size={16} /> Save salary plan</button>
+        </div>
+      </form>
+    </Panel>
+
+    <div className="callout">
+      <Sparkles size={21} />
+      <div>
+        <strong>Save first, spend mindfully.</strong>
+        <p>Your ₹2,000 fixed saving is reserved first. The remaining salary is divided by percentage, and those percentages must add up to 100% before you can save the plan.</p>
+      </div>
+    </div>
+  </div>;
 }
 function LoansPage({ loans, tab, setTab, setModal, setLoanForm, setRepay, onDelete, money }) {
   const rows = loans.filter(l=>l.direction===tab);
